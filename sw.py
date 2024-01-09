@@ -124,7 +124,7 @@ def rawparse( arr, beg ):
         
 
 def rawdecode( arr, beg, end=None ):
-    """ Decode the raw bytearray `arr' from SW file into utf-8 string
+    """ Decode the raw bytearray `arr' from SW file into utf-8 string.
 
     Note: without the last argument `end', scans for the end of text
     when parsing.
