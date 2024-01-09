@@ -1,3 +1,6 @@
+# sw.py -- Reads and decode TXT files on Canon's StarWriter 300 diskettes
+# Tuesday, January 9, 2024
+
 import sys
 import re
 
