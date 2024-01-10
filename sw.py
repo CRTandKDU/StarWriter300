@@ -1,5 +1,5 @@
 # sw.py -- Reads and decode TXT files on Canon's StarWriter 300 diskettes
-# Tuesday, January 9, 2024
+# Tuesday, January 9, 2024 -- Initial commit.
 
 import sys
 import re
@@ -16,12 +16,12 @@ from prompt_toolkit.shortcuts import input_dialog
 # Diskette
 SECTOR_SIZE, SECTOR, TRACK = 512, 18, 160
 SECTOR_VISIBLE  = 0
-# SECTOR_READSIZE = SECTOR_SIZE*SECTOR*TRACK
-SECTOR_READSIZE = SECTOR_SIZE*120
+SECTOR_READSIZE = SECTOR_SIZE*SECTOR*TRACK
+# SECTOR_READSIZE = SECTOR_SIZE*120
 BARR            = None
 
 # GUI (prompt_toolkit)
-INFOTEMPLATE    = '<aaa fg="ansiwhite" bg="ansigreen">Sector: {sector:4d} (0x{sector_addr:04X})| &#8593;, &#8595;: dec, inc sector; C-s: search, /: next; C-q: quit</aaa>'
+INFOTEMPLATE    = '<aaa fg="ansiwhite" bg="ansigreen">Sector: {sector:4d} (0x{sector_addr:04X})| &#8593;, &#8595;: dec, inc sector; C-s: search, /: next; C-z: org; C-q: quit</aaa>'
 
 # Search state
 SEARCH_START, SEARCH_REG = None, None
@@ -142,24 +142,117 @@ def rawdecode( arr, beg, end=None ):
     for (src,tgt)  in CODEPAGE:
         decoded = decoded.replace( src, tgt )
     return decoded, end03
-   
 
-def raw2content( arr, idx ):
-    s        = '\nDocHdr: {dh:01X}, File: {fn}\nTrigger: {trigger:04X}, Len: {len:6d}, End: {end:6d}, Char: {c:01X}\n'
-    offset   = idx+9+2+8+8+8+4
-    dh       = arr[ offset ]
-    offset  += 1+12+8+3
+def raw2subheader( arr, idx ):
+    """ Decode subheader.
+
+    Note: subheader appears in the directory file and before each text file.
+    """
+    offset = idx
     fn, end  = rawdecode( arr, offset, offset+8 )
     offset  += 8+3+10+36
     trigger  = int.from_bytes(arr[offset:offset+2])
     length   = int.from_bytes( arr[offset+2:offset+6], "little" )
+    dirbyte  = int.from_bytes( arr[offset+6:offset+7], "little" )
+    return( fn, trigger, length, end, dirbyte, offset )
+
+
+def raw2header( arr, idx ):
+    """ Decode file header.
+
+    Note: The header structure is from rtaylor187 github:
+    // Canon File Header - common to all StarWriter files
+    //
+    //  00      short       zeros1      0x0000
+    //  02      byte[5]     canon       "Canon"
+    //  07      byte[4]     str1        "ETW1"
+    //  0b      short       zeroes2     0x0000
+    //  0d      byte[24]    str2/3/4    "V021    CBS1A01 TLCS-900"
+    //  25      int         dataLen     0xXXXXXXXX
+    //
+    // TXT Document Header
+    //
+    //   29     byte            val1        0x9F
+    //   2A     byte[12]        zeros3      
+    //   36     char[8]         str5        "VS180   "
+    //   3E     byte[3]         zeros4      0x000000
+    //   41     char[8]         fileName    "????????"
+    //   49     char[3]         fileExt     "TXT"
+    //   4C     char[10]        fileDate    "??????????"
+    //   56     char[36]        descrip     "???..."
+    //   7A     short           val2        0x5b17          - magic for "text document"?
+    //   7C     int             txtLen      0xXXXXXXXX
+    //   80     byte[136]       docHdrMisc  unknown header data
+    //  108     byte[txtLen-136]  document data (starts w/0x12)
+    """
+    # Common header
+    offset   = idx+9+2+8+8+8+4
+    # 0x9F
+    dh       = arr[ offset ]
+    # Pos at beginning of file name
+    offset  += 1+12+8+3
+    # Warning: `offset' is incremented
+    ( fn, trigger, length, end, dirbyte, offset ) = raw2subheader( arr, offset )
     c        = arr[offset+142]
+    return( dh, fn, trigger, length, end, c, dirbyte, offset+142 )
+
+def raw2org( arr, idx ):
+    nfiles, offset   = 0, 0
+    ( dh, fn, trigger, length, end, c, dirbyte, upd_idx ) = raw2header( arr, idx )
+    # Directory
+    if 159 == dh and 5979 == trigger and dirbyte == 0:
+        nfiles, offset = 1, upd_idx - 142 + 7
+        with open( "out.org", "a", encoding='utf-8' ) as out:
+            out.write( '* Directory\n' )
+            out.write( '  - [[{fn}]]\n'.format(fn=fn) )
+        while 0 == dirbyte:
+            (fn, trigger, length, end, dirbyte, offset) = raw2subheader( arr, offset)
+            nfiles += 1
+            offset += 7
+            with open( "out.org", "a", encoding='utf-8' ) as out:
+                out.write( '  - [[{fn}]]\n'.format(fn=fn) )
+        return nfiles
+
+    # The block is a text file: decode and convert.
+    if 159 == dh and 5979 == trigger and 18 == c:
+        with open( "out.org", "a", encoding='utf-8' ) as out:
+            # txt, end = rawdecode( arr, offset+142, offset+(length-136) )
+            txt, end = rawdecode( arr, upd_idx )
+            # out.write( s.format( dh=dh, fn=fn, trigger=trigger, len=length, end=end, c=c ) )
+            out.write( '* {fn}\n'.format(fn=fn) )
+            out.write( txt )
+            out.write( '\n\n' )
+    return 0
+
+def raw2content( arr, idx ):
+    nfiles, offset   = 0, 0
+    s        = '\nDocHdr: {dh:01X}, File: {fn}\nTrigger: {trigger:04X}, Len: {len:6d}, End: {end:6d}, Dirbyte: {dirbyte:4d}, Char: {c:01X}\n'
+    ( dh, fn, trigger, length, end, c, dirbyte, upd_idx ) = raw2header( arr, idx )
+
+    # Decode Info
+    with open( "out.txt", "a", encoding='utf-8' ) as out:
+        out.write( s.format( dh=dh, fn=fn, trigger=trigger, len=length, end=end, dirbyte=dirbyte, c=c ) )
+    # The block is the diskette directory
+    if 159 == dh and 5979 == trigger and dirbyte == 0:
+        nfiles, offset = 1, upd_idx - 142 + 7
+        with open( "out.txt", "a", encoding='utf-8' ) as out:
+            out.write( '{fn}\n'.format(fn=fn) )
+        while 0 == dirbyte:
+            (fn, trigger, length, end, dirbyte, offset) = raw2subheader( arr, offset)
+            nfiles += 1
+            offset += 7
+            with open( "out.txt", "a", encoding='utf-8' ) as out:
+                out.write( '{fn}\n'.format(fn=fn) )
+        return
+
+    # The block is a text file: decode and convert.
     if 159 == dh and 5979 == trigger and 18 == c:
         with open( "out.txt", "a", encoding='utf-8' ) as out:
             # txt, end = rawdecode( arr, offset+142, offset+(length-136) )
-            txt, end = rawdecode( arr, offset+142 )
-            out.write( s.format( dh=dh, fn=fn, trigger=trigger, len=length, end=end, c=c ) )
+            txt, end = rawdecode( arr, upd_idx )
+            # out.write( s.format( dh=dh, fn=fn, trigger=trigger, len=length, end=end, c=c ) )
             out.write( txt )
+            out.write( '\n\n' )
 
     
 def sector2ascii( arr ):
@@ -248,6 +341,23 @@ if __name__ == '__main__':
         SEARCH_START   = SEARCH_START + m.end()
         buff2sector( BARR, SECTOR_VISIBLE )
         
+    @kb.add('c-z')
+    def extract_( event ):
+        global SECTOR_READSIZE, SECTOR_VISIBLE, BARR, SEARCH_START, SEARCH_REG
+        search_( event )
+        # Directory should be second block
+        m = re.search( SEARCH_REG, BARR[SEARCH_START:] )
+        if None == m : return
+        nfiles = raw2org( BARR, SEARCH_START + m.start() )
+        if nfiles > 0:
+            for i in range( nfiles+1 ):
+                SECTOR_VISIBLE = (SEARCH_START + m.start()) // SECTOR_SIZE
+                SEARCH_START   = SEARCH_START + m.end()
+                m = re.search( SEARCH_REG, BARR[SEARCH_START:] )
+                if None == m : return
+                ignore = raw2org( BARR, SEARCH_START + m.start() )
+
+
 
     @kb.add('c-q')
     def exit_(event):
